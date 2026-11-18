@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PrintGate</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:640px;margin:0 auto;padding:16px;color:#1a1a1a}
+h1{font-size:22px}h2{font-size:17px}label{display:block;margin:12px 0 4px;font-size:14px;color:#555}
+input,select,button{font-size:16px;padding:10px;border:1px solid #ccc;border-radius:8px;width:100%;box-sizing:border-box}
+button{background:#1a1a1a;color:#fff;border:0;cursor:pointer;margin-top:16px}
+button.s{background:#e8e8e8;color:#111;width:auto;margin:8px 6px 0 0;padding:6px 14px}
+label.chk{display:flex;gap:8px;align-items:center}label.chk input{width:auto}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>div{flex:1;min-width:110px}.card{border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}
+.tok{font-size:56px;font-weight:700;text-align:center}.mut{color:#777;font-size:13px}.err{color:#b00}
+.amt{font-size:20px;font-weight:600;text-align:center}
+@media(prefers-color-scheme:dark){body{background:#151515;color:#eee}input,select{background:#222;color:#eee;border-color:#444}.card{border-color:#333}button{background:#eee;color:#111}button.s{background:#333;color:#eee}label{color:#aaa}}
+#pa{display:none}
+.pg{width:100%;break-after:page;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;color:#000}
+.thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.th{width:100px;border:1px solid #ddd;border-radius:8px;padding:4px;text-align:center;font-size:12px}
+.th .box{height:100px;display:flex;align-items:center;justify-content:center;overflow:hidden}.th img{max-width:90px;max-height:96px;transition:transform .2s}
+.tb{background:#e8e8e8;color:#111;width:auto;margin:2px;padding:3px 7px;font-size:12px;border:0;border-radius:6px;cursor:pointer}
+@media(prefers-color-scheme:dark){.tb{background:#333;color:#eee}.th{border-color:#333}}
+.docp{font:12pt/1.4 Georgia,serif;color:#000;break-after:page;overflow-wrap:anywhere}.docp:last-child{break-after:auto}
+.docp img{max-width:100%}.docp table{border-collapse:collapse}.docp td,.docp th{border:1px solid #999;padding:3px 6px}.bw .docp{filter:grayscale(1)}
+.pg:last-child{break-after:auto}.pg img{max-width:100%;max-height:100%}.bw .pg img{filter:grayscale(1)}
+@media print{body>*:not(#pa){display:none!important}#pa{display:block}body{margin:0;padding:0;max-width:none;background:#fff}}
+</style><style id="pgstyle"></style>
+</head><body><div id="app"><p style="color:#777">Loading PrintGate...</p></div><div id="pa"></div>
+<script>
+const $=s=>document.querySelector(s);
+const el=(t,p={},...k)=>{const e=document.createElement(t);for(const[a,v]of Object.entries(p)){if(a==='class')e.className=v;else if(a.startsWith('on'))e[a]=v;else if(a==='text')e.textContent=v;else e.setAttribute(a,v)}e.append(...k);return e};
+const bug=m=>{let d=$('#bug');if(!d){d=el('div',{id:'bug',class:'card err'});document.body.prepend(d)}d.textContent=m};
+addEventListener('error',e=>bug('Something went wrong: '+(e.message||'script error')));
+addEventListener('unhandledrejection',e=>bug('Something went wrong: '+((e.reason&&e.reason.message)||e.reason)));
+const uid=()=>crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
+const MAXMB=15,TTL=30*60e3,SIZES={A4:[210,297],A3:[297,420],Letter:[215.9,279.4]};
+/* Add your own TURN relay here if some customers cannot connect, e.g. {urls:'turn:your.server:3478',username:'u',credential:'p'} */
+const ICE_EXTRA=[];
+const AGENT='http://127.0.0.1:8765'; /* local PrintGate Agent (printagent.py) on the shop PC */
+const PEER_OPTS={config:{iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun.cloudflare.com:3478'},
+ {urls:'turn:eu-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},{urls:'turn:us-0.turn.peerjs.com:3478',username:'peerjs',credential:'peerjsp'},...ICE_EXTRA]}};
+async function docxToHtml(u8,w,h){
+ const r=await mammoth.convertToHtml({arrayBuffer:u8.slice().buffer});
+ const doc=new DOMParser().parseFromString(r.value,'text/html');
+ doc.querySelectorAll('script,iframe,object,embed,link,style,form').forEach(n=>n.remove());
+ doc.querySelectorAll('*').forEach(n=>{for(const a of [...n.attributes]){if(/^on/i.test(a.name)||(/^(href|src)$/i.test(a.name)&&/^\s*javascript:/i.test(a.value)))n.removeAttribute(a.name)}});
+ const html=doc.body.innerHTML;
+ const m=el('div',{class:'docp'});m.style.cssText=`position:fixed;left:-99999px;top:0;width:${w-24}mm`;m.innerHTML=html;document.body.append(m);
+ await Promise.all([...m.querySelectorAll('img')].map(i=>i.decode().catch(()=>{})));
+ const pages=Math.max(1,Math.ceil(m.scrollHeight/((h-24)*96/25.4)));m.remove();
+ return{html,pages};
+}
+const loadImg=src=>new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error('Could not read that photo'));i.src=src});
+function cleanDoc(cv){ /* brighten paper, grey-scale, stretch contrast */
+ const cx=cv.getContext('2d'),d=cx.getImageData(0,0,cv.width,cv.height),a=d.data,n=a.length/4,hist=new Uint32Array(256);
+ for(let i=0;i<a.length;i+=4){const g=(a[i]*299+a[i+1]*587+a[i+2]*114)/1000|0;a[i]=g;hist[g]++}
+ let lo=0,hi=255,acc=0;
+ for(let v=0;v<256;v++){acc+=hist[v];if(acc>n*0.02){lo=v;break}}
+ acc=0;for(let v=255;v>=0;v--){acc+=hist[v];if(acc>n*0.15){hi=v;break}}
+ if(hi-lo<30){lo=0;hi=255}
+ const sc=255/(hi-lo);
+ for(let i=0;i<a.length;i+=4){let v=(a[i]-lo)*sc;v=v<0?0:v>255?255:v;a[i]=a[i+1]=a[i+2]=v}
+ cx.putImageData(d,0,0);
+}
+function jpegPdf(pages){ /* pages: [{jpg:Uint8Array,w,h}] -> one A4 PDF Blob, no library needed */
+ const enc=new TextEncoder(),parts=[],offs=[];let off=0;
+ const push=b=>{const u=typeof b==='string'?enc.encode(b):b;parts.push(u);off+=u.length};
+ const obj=(n,fn)=>{offs[n]=off;push(n+' 0 obj\n');fn();push('\nendobj\n')};
+ const N=pages.length,W=595.28,H=841.89;
+ push('%PDF-1.4\n');
+ obj(1,()=>push('<< /Type /Catalog /Pages 2 0 R >>'));
+ obj(2,()=>push('<< /Type /Pages /Kids ['+pages.map((_,i)=>(3+i*3)+' 0 R').join(' ')+'] /Count '+N+' >>'));
+ pages.forEach((p,i)=>{
+  const pg=3+i*3,ct=pg+1,im=pg+2,k=Math.min(W/p.w,H/p.h),dw=p.w*k,dh=p.h*k,x=(W-dw)/2,y=(H-dh)/2;
+  const c='q '+dw.toFixed(2)+' 0 0 '+dh.toFixed(2)+' '+x.toFixed(2)+' '+y.toFixed(2)+' cm /I'+i+' Do Q';
+  obj(pg,()=>push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+W+' '+H+'] /Resources << /XObject << /I'+i+' '+im+' 0 R >> >> /Contents '+ct+' 0 R >>'));
+  obj(ct,()=>push('<< /Length '+c.length+' >>\nstream\n'+c+'\nendstream'));
+  obj(im,()=>{push('<< /Type /XObject /Subtype /Image /Width '+p.w+' /Height '+p.h+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+p.jpg.length+' >>\nstream\n');push(p.jpg);push('\nendstream')});
+ });
+ const xr=off,total=3+N*3;
+ push('xref\n0 '+total+'\n0000000000 65535 f \n');
+ for(let n=1;n<total;n++)push(String(offs[n]).padStart(10,'0')+' 00000 n \n');
+ push('trailer\n<< /Size '+total+' /Root 1 0 R >>\nstartxref\n'+xr+'\n%%EOF');
+ return new Blob(parts,{type:'application/pdf'});
+}
+const q=new URLSearchParams(location.search);
+const LIBS={
+ peer:{name:'PeerJS',ok:()=>window.Peer,urls:['https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js','https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js','https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js']},
+ pdf:{name:'PDF reader',ok:()=>window.pdfjsLib,urls:['https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js','https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js']},
+ qr:{name:'QR code',ok:()=>window.QRCode,urls:['https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js','https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js']},
+ word:{name:'Word reader',ok:()=>window.mammoth,urls:['https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js','https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js']}};
+const loadOne=u=>new Promise(res=>{const t=document.createElement('script');const to=setTimeout(()=>{t.remove();res(false)},9000);t.src=u;t.onload=()=>{clearTimeout(to);res(true)};t.onerror=()=>{clearTimeout(to);t.remove();res(false)};document.head.append(t)});
+async function need(key){const L=LIBS[key];if(L.ok())return true;for(const u of L.urls){await loadOne(u);if(L.ok())return true}return false}
+async function start(){
+ const mode=q.has('admin')?'shop':q.get('s')?'cust':'land';
+ if(mode==='land')return landing();
+ $('#app').innerHTML='<p class="mut">Loading PrintGate...</p>';
+ const want=mode==='shop'?['peer','pdf','qr','word']:['peer'];
+ const got=await Promise.all(want.map(need));
+ const miss=want.filter((k,i)=>!got[i]&&k!=='word').map(k=>LIBS[k].name);
+ if(miss.length){$('#app').innerHTML='';return bug('Could not load: '+miss.join(', ')+'. Check the internet connection, and turn off any ad-blocker or VPN that blocks cdn.jsdelivr.net / cdnjs.cloudflare.com, then reload.')}
+ if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ if(mode==='shop'){if(location.protocol==='file:')bug('You opened this as a local file. Open your GitHub Pages address (https://...github.io/...) instead, or customers will not be able to use the QR code.');shopMode()}
+ else customerMode(q.get('s'));
+}
+start();
+
+function landing(){$('#app').innerHTML='<h1>PrintGate</h1><p>Scan the QR code at the print shop to send your document.</p><p><a href="?admin" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#1a1a1a;color:#fff;text-decoration:none">I am the shop owner - open the shop dashboard</a></p><p class="mut">(Same as adding <b>?admin</b> to the end of the address.)</p>'}
+
+/* ---------------- CUSTOMER ---------------- */
+function customerMode(id){
+ $('#app').innerHTML=`<h1 id=sn>Print shop</h1><p class=mut id=st>Connecting to the shop...</p>
+ <form id=f hidden><label>Your file (PDF, Word .docx, JPG or PNG, max ${MAXMB} MB)</label><input id=file type=file accept=".pdf,.docx,.jpg,.jpeg,.png">
+ <div class=card><b>Or scan paper pages with your camera</b><p class=mut style="margin:4px 0">Take a photo of each page (flat, good light). Pages are combined into one PDF.</p>
+ <button type=button class=s id=cam style="margin-top:4px">Take photo</button><button type=button class=s id=gal style="margin-top:4px">Add from gallery</button>
+ <input id=camf type=file accept="image/*" capture=environment hidden><input id=galf type=file accept="image/*" multiple hidden>
+ <label class=chk><input type=checkbox id=cl checked> Clean up (whiten paper, black &amp; white look)</label>
+ <div class=thumbs id=th></div></div>
+ <label>Your name (optional)</label><input id=nm maxlength=40>
+ <div class=row><div><label>Copies</label><input id=cp type=number value=1 min=1 max=50></div>
+ <div><label>Colour</label><select id=co><option value=bw>B/W</option><option value=color>Colour</option></select></div>
+ <div><label>Paper</label><select id=pp><option>A4</option><option>A3</option><option>Letter</option></select></div>
+ <div><label>Sides</label><select id=du><option value=0>Single</option><option value=1>Double</option></select></div></div>
+ <p class=mut id=pr></p><button id=b>Send to shop</button><p class=err id=e></p></form>
+ <div id=r hidden><div class=card><div class=mut>Your token number</div><div class=tok id=t></div><p class=amt id=am></p><p id=s></p></div>
+ <p class=mut>Your file is already with the shop, so you can close this page and just show your token at the counter. Nothing is stored online, and the file is deleted right after printing. Reopen this page any time to check progress.</p>
+ <button id=again class=s hidden>Send another file</button></div>`;
+ const L={queued:'Waiting in queue...',printing:'Printing now...',done:'Printed! Collect at the counter. Your file has been deleted.',error:'Printing failed - please see the shopkeeper.',rejected:'The shop declined this file.',expired:'Timed out and deleted. Please upload again.'};
+ const KEY='pg_job';let jobId=null;let scan=[];
+ try{const v=JSON.parse(localStorage.getItem(KEY));if(v&&v.s===id)jobId=v.job}catch{}
+ const clear=()=>{jobId=null;try{localStorage.removeItem(KEY)}catch{}};
+ const st=t=>{$('#st').hidden=false;$('#st').textContent=t};
+ const reset=()=>{clear();clearScan();$('#r').hidden=true;$('#f').hidden=false;$('#b').disabled=false;$('#b').textContent='Send to shop';$('#file').value='';$('#e').textContent=''};
+ const fail=m=>{$('#e').textContent=m;$('#b').disabled=false;$('#b').textContent='Send to shop'};
+ $('#again').onclick=reset;
+ const MAXPAGES=20;
+ function clearScan(){scan.forEach(p=>URL.revokeObjectURL(p.url));scan=[];drawThumbs()}
+ function drawThumbs(){
+  const t=$('#th');t.replaceChildren();
+  scan.forEach((p,i)=>{
+   const mv=d=>{const j=i+d;if(j<0||j>=scan.length)return;[scan[i],scan[j]]=[scan[j],scan[i]];drawThumbs()};
+   const im=el('img',{src:p.url});im.style.transform='rotate('+p.rot+'deg)';
+   t.append(el('div',{class:'th'},el('div',{class:'box'},im),el('div',{text:'Page '+(i+1)}),
+    el('button',{type:'button',class:'tb',text:'Rotate',onclick:()=>{p.rot=(p.rot+90)%360;drawThumbs()}}),
+    el('button',{type:'button',class:'tb',text:'Up',onclick:()=>mv(-1)}),el('button',{type:'button',class:'tb',text:'Down',onclick:()=>mv(1)}),
+    el('button',{type:'button',class:'tb',text:'Remove',onclick:()=>{URL.revokeObjectURL(p.url);scan.splice(i,1);drawThumbs()}})));
+  });
+ }
+ async function addPhotos(files){
+  $('#e').textContent='';$('#file').value='';
+  for(const f of files){
+   if(scan.length>=MAXPAGES){fail('Maximum '+MAXPAGES+' pages');break}
+   try{
+    const u=URL.createObjectURL(f),im=await loadImg(u);URL.revokeObjectURL(u);
+    const k=Math.min(1,1800/Math.max(im.naturalWidth,im.naturalHeight)),cv=el('canvas'),w=Math.round(im.naturalWidth*k),h=Math.round(im.naturalHeight*k);
+    cv.width=w;cv.height=h;cv.getContext('2d').drawImage(im,0,0,w,h);
+    const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.85));
+    scan.push({blob,url:URL.createObjectURL(blob),rot:0});
+   }catch(e){fail(e.message)}
+  }
+  drawThumbs();
+ }
+ async function buildScanPdf(){
+  const out=[];
+  for(const p of scan){
+   const im=await loadImg(p.url),r=p.rot%180!==0,w=r?im.naturalHeight:im.naturalWidth,h=r?im.naturalWidth:im.naturalHeight;
+   const cv=el('canvas');cv.width=w;cv.height=h;const cx=cv.getContext('2d');
+   cx.fillStyle='#fff';cx.fillRect(0,0,w,h);cx.translate(w/2,h/2);cx.rotate(p.rot*Math.PI/180);cx.drawImage(im,-im.naturalWidth/2,-im.naturalHeight/2);
+   if($('#cl').checked)cleanDoc(cv);
+   const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',0.8));
+   out.push({jpg:new Uint8Array(await blob.arrayBuffer()),w,h});
+  }
+  return jpegPdf(out);
+ }
+ $('#cam').onclick=()=>$('#camf').click();$('#gal').onclick=()=>$('#galf').click();
+ $('#camf').onchange=async e=>{await addPhotos([...e.target.files]);e.target.value=''};
+ $('#galf').onchange=async e=>{await addPhotos([...e.target.files]);e.target.value=''};
+ $('#file').onchange=()=>{if($('#file').files[0]&&scan.length)clearScan()};
+ const peer=new Peer(PEER_OPTS);let conn=null,tries=0;
+ function connect(){
+  if(conn&&conn.open)return;
+  const c=conn=peer.connect(id,{reliable:true});
+  const wait=setTimeout(()=>{if(!c.open){try{c.close()}catch{}tries++;if(tries>=2)st('Still trying to reach the shop. Please make sure PrintGate is open on the shop computer.');connect()}},8000);
+  c.on('open',()=>{clearTimeout(wait);tries=0;if(jobId)c.send({type:'resume',id:jobId})});
+  c.on('close',()=>{clearTimeout(wait);if(conn===c){if(jobId)$('#s').textContent='Reconnecting...';setTimeout(connect,4000)}});
+  c.on('data',d=>{
+   if(d.type==='hello'){$('#sn').textContent=d.shop;$('#st').hidden=true;$('#pr').textContent=`Price per page: B/W ${d.cur}${d.bw} | Colour ${d.cur}${d.color}`;if(!jobId)$('#f').hidden=false}
+   else if(d.type==='ack'){jobId=d.id;try{localStorage.setItem(KEY,JSON.stringify({s:id,job:jobId}))}catch{}
+    $('#f').hidden=true;$('#r').hidden=false;$('#t').textContent='#'+d.token;
+    $('#am').textContent=`Pay at counter: ${d.cur}${d.amount} (${d.est?'about ':''}${d.pages} page${d.pages>1?'s':''} x ${d.copies})`;$('#s').textContent=L.queued}
+   else if(d.type==='status'){
+    if(d.status==='gone')reset();
+    else{$('#s').textContent=L[d.status]||d.status;$('#again').hidden=!['done','rejected','expired','error'].includes(d.status)}}
+   else if(d.type==='error')fail(d.msg)});
+ }
+ peer.on('open',connect);
+ peer.on('disconnected',()=>peer.reconnect());
+ peer.on('error',e=>st(e.type==='peer-unavailable'?'The shop looks offline. Trying again...':'Connection problem ('+e.type+'). Trying again...'));
+ $('#f').onsubmit=async e=>{e.preventDefault();let fl=$('#file').files[0];
+  if(!fl&&scan.length){$('#b').disabled=true;$('#b').textContent='Preparing scan...';
+   try{fl=new File([await buildScanPdf()],'scan.pdf',{type:'application/pdf'})}catch(x){return fail('Could not prepare the scan: '+x.message)}}
+  if(!fl)return fail('Choose a file, or scan some pages first');
+  if(fl.size>MAXMB*1048576)return fail('File too large (max '+MAXMB+' MB). For scans, use fewer pages.');
+  if(!conn||!conn.open)return fail('Not connected to the shop yet. Please wait a moment.');
+  $('#e').textContent='';$('#b').disabled=true;$('#b').textContent='Sending...';
+  conn.send({type:'job',name:$('#nm').value.slice(0,40),filename:fl.name,copies:+$('#cp').value||1,color:$('#co').value,paper:$('#pp').value,duplex:$('#du').value==='1',file:await fl.arrayBuffer()})};
+}
+
+/* ---------------- SHOP ---------------- */
+function shopMode(){
+ const store={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+ const cfg=Object.assign({shop:'Print Shop',cur:'AED ',bw:0.5,color:2,auto:false,token:'',printer:''},store.get('pg_cfg',{}));
+ let id=store.get('pg_id',null);
+ if(!id){id='pg'+Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>(b%36).toString(36)).join('');store.set('pg_id',id)}
+ const jobs=[];let seq=0,printing=false,agent=null;
+ $('#app').innerHTML=`<h1>PrintGate - shop</h1><p id=net class=mut>Connecting...</p>
+ <div class=card><label>Shop name</label><input id=sn maxlength=40>
+ <div class=row><div style=flex:1><label>B/W price / page</label><input id=pb type=number step=0.25 min=0></div>
+ <div style=flex:1><label>Colour price / page</label><input id=pc type=number step=0.25 min=0></div>
+ <div style=width:90px><label>Currency</label><input id=cu maxlength=6></div></div>
+ <label class=chk><input type=checkbox id=au> Auto-print new jobs</label></div>
+ <div class=card><b>Print agent (optional, for full printer control)</b><p class=mut id=ags></p>
+ <label>Agent token (shown when you start printagent.py)</label><input id=at type=password autocomplete=off>
+ <label>Printer</label><select id=apr><option value="">Default printer</option></select></div>
+ <div class=card><b>Shop QR</b><div id=qr style="margin:10px 0"></div><p class=mut id=ur></p><button class=s id=pq>Print this QR</button></div>
+ <h2>Queue</h2><div id=q></div>`;
+ $('#sn').value=cfg.shop;$('#cu').value=cfg.cur;$('#pb').value=cfg.bw;$('#pc').value=cfg.color;$('#au').checked=cfg.auto;
+ const save=()=>{cfg.shop=$('#sn').value.slice(0,40)||'Print Shop';cfg.cur=$('#cu').value;cfg.bw=Math.max(0,+$('#pb').value||0);cfg.color=Math.max(0,+$('#pc').value||0);cfg.auto=$('#au').checked;store.set('pg_cfg',cfg);pump()};
+ ['sn','cu','pb','pc','au'].forEach(i=>$('#'+i).onchange=save);
+ $('#at').value=cfg.token||'';
+ async function pingAgent(){
+  if(!cfg.token){agent=null;return agentUI()}
+  try{const r=await fetch(AGENT+'/ping',{headers:{'X-Token':cfg.token}});
+   if(r.status===401){agent=null;return agentUI('Print agent found, but the token is wrong.')}
+   agent=await r.json();
+  }catch{agent=null}
+  agentUI();pump();
+ }
+ function agentUI(msg){
+  $('#ags').textContent=agent?'Connected: jobs print directly with full control (double-sided, colour, Word files).'+(agent.dry?' TEST MODE - nothing is really printed.':''):(msg||'Not connected: using the browser print dialog instead. Start printagent.py on this PC and paste its token below.');
+  const sel=$('#apr');sel.replaceChildren(el('option',{value:'',text:'Default printer'}));
+  ((agent&&agent.printers)||[]).forEach(n=>sel.append(el('option',{value:n,text:n})));sel.value=cfg.printer||'';
+  render();
+ }
+ $('#at').onchange=()=>{cfg.token=$('#at').value.trim();store.set('pg_cfg',cfg);pingAgent()};
+ $('#apr').onchange=()=>{cfg.printer=$('#apr').value;store.set('pg_cfg',cfg)};
+ async function agentPrint(j){
+  const p=new URLSearchParams({copies:j.copies,color:j.color?1:0,duplex:j.duplex?1:0,paper:j.paper,ext:j.type,printer:cfg.printer||''});
+  try{
+   const r=await fetch(AGENT+'/print?'+p,{method:'POST',headers:{'X-Token':cfg.token||''},body:j.orig||j.blob});
+   const d=await r.json().catch(()=>({}));
+   if(r.ok&&d.ok)return{ok:true};
+   return{ok:false,msg:d.error||('Agent error '+r.status),convert:d.code==='convert'};
+  }catch{return{unreachable:true}}
+ }
+ const url=location.origin+location.pathname+'?s='+id;
+ new QRCode($('#qr'),{text:url,width:220,height:220});$('#ur').textContent=url;
+
+ const notify=(j,status)=>{j.status=status;try{j.conn.send({type:'status',status})}catch{}};
+ const net=t=>$('#net').textContent=t;
+ const peer=new Peer(id,PEER_OPTS);
+ const lock=async()=>{try{await navigator.wakeLock.request('screen')}catch{}};lock();
+ document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')lock()});
+ addEventListener('beforeunload',e=>{if(jobs.some(j=>j.status==='queued'||j.status==='printing')){e.preventDefault();e.returnValue=''}});
+ const beep=()=>{try{const a=new AudioContext(),o=a.createOscillator();o.connect(a.destination);o.frequency.value=880;o.start();setTimeout(()=>{o.stop();a.close()},200)}catch{}};
+ peer.on('open',()=>net('Online - customers can send files. Keep this page open.'));
+ peer.on('disconnected',()=>{net('Reconnecting...');peer.reconnect()});
+ peer.on('error',e=>net(e.type==='unavailable-id'?'This shop page is already open in another tab or device.':'Network problem: '+e.type));
+ peer.on('connection',c=>{c.on('open',()=>c.send({type:'hello',shop:cfg.shop,cur:cfg.cur,bw:cfg.bw,color:cfg.color}));c.on('data',d=>onJob(c,d))});
+
+ async function onJob(c,d){
+  if(!d)return;
+  if(d.type==='resume'){
+   const j=jobs.find(x=>x.id===d.id);
+   if(!j)return c.send({type:'status',status:'gone'});
+   j.conn=c;c.send({type:'ack',id:j.id,token:j.token,pages:j.pages,copies:j.copies,amount:j.amount,cur:cfg.cur,est:j.type==='docx'});
+   return c.send({type:'status',status:j.status});
+  }
+  if(d.type!=='job')return;
+  const err=m=>c.send({type:'error',msg:m});
+  if(jobs.filter(j=>['queued','printing'].includes(j.status)).length>=30)return err('Queue is full, please try again shortly');
+  const b=d.file;if(!b)return err('No file received');
+  const u8=b instanceof ArrayBuffer?new Uint8Array(b):new Uint8Array(b.buffer,b.byteOffset,b.byteLength);
+  if(u8.length>MAXMB*1048576)return err('File too large');
+  const is=(...s)=>s.every((x,i)=>u8[i]===x);
+  const fname=String(d.filename||'file').slice(0,60);
+  const type=is(0x25,0x50,0x44,0x46)?'pdf':is(0x89,0x50,0x4E,0x47)?'png':is(0xFF,0xD8,0xFF)?'jpg':(is(0x50,0x4B,0x03,0x04)&&/\.docx$/i.test(fname))?'docx':null;
+  if(!type)return err('Only PDF, Word (.docx), JPG or PNG files are supported');
+  const copies=Math.max(1,Math.min(parseInt(d.copies)||1,50)),color=d.color==='color',paper=SIZES[d.paper]?d.paper:'A4',duplex=d.duplex===true;
+  const [w,h]=SIZES[paper];
+  let pages=1,html=null;
+  if(type==='pdf'){try{const p=await pdfjsLib.getDocument({data:u8.slice()}).promise;pages=p.numPages;p.destroy()}catch{return err('Could not read this PDF')}}
+  if(type==='docx'){try{const r=await docxToHtml(u8,w,h);html=r.html;pages=r.pages}catch{return err('Could not read this Word file. Please upload a PDF instead.')}}
+  if(pages>100)return err('Maximum 100 pages per file');
+  const amount=+(pages*copies*(color?cfg.color:cfg.bw)).toFixed(2);
+  const j={id:uid(),token:++seq,name:String(d.name||'').slice(0,40),filename:fname,html,
+   orig:html?new Blob([u8]):null,
+   blob:html?null:new Blob([u8],{type:type==='pdf'?'application/pdf':'image/'+(type==='png'?'png':'jpeg')}),type,pages,copies,color,paper,duplex,amount,status:'queued',created:Date.now(),conn:c};
+  jobs.push(j);c.send({type:'ack',id:j.id,token:j.token,pages,copies,amount,cur:cfg.cur,est:type==='docx'});beep();render();pump();
+ }
+ function pump(){if(cfg.auto&&!printing){const n=jobs.find(x=>x.status==='queued'&&(agent||!x.duplex));if(n)print(n)}}
+ function rejectJob(j){if(j.status!=='queued')return;j.blob=null;j.html=null;j.orig=null;j.finished=Date.now();notify(j,'rejected');render()}
+ const printAndWait=()=>new Promise(res=>{const d=()=>{removeEventListener('afterprint',d);res()};addEventListener('afterprint',d);setTimeout(()=>window.print(),50);setTimeout(d,180000)});
+ const clone=n=>n.cloneNode();
+ async function print(j){
+  if(j.status!=='queued'||printing)return;printing=true;notify(j,'printing');render();
+  const pa=$('#pa'),urls=[];
+  try{
+   if(agent){
+    const r=await agentPrint(j);
+    if(r.ok){j.finished=Date.now();notify(j,'done');return}
+    if(r.unreachable){agent=null;agentUI()}
+    else if(!(r.convert&&j.html))throw new Error(r.msg);
+   }
+   const [w,h]=SIZES[j.paper];
+   $('#pgstyle').textContent=`@page{size:${w}mm ${h}mm;margin:0}.pg{height:${h-1}mm}`;
+   pa.className=j.color?'':'bw';pa.replaceChildren();
+   if(j.type==='docx'){
+    $('#pgstyle').textContent=`@page{size:${w}mm ${h}mm;margin:12mm}`;
+    for(let c=0;c<j.copies;c++){const dv=el('div',{class:'docp'});dv.innerHTML=j.html;pa.append(dv)}
+    await Promise.all([...pa.querySelectorAll('img')].map(i=>i.decode().catch(()=>{})));
+    await new Promise(r=>setTimeout(r,400));await printAndWait();
+    j.finished=Date.now();notify(j,'done');return;
+   }
+   const imgs=[];
+   if(j.type==='pdf'){
+    const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await j.blob.arrayBuffer())}).promise;
+    for(let i=1;i<=pdf.numPages;i++){const pg=await pdf.getPage(i),vp=pg.getViewport({scale:2}),cv=el('canvas');cv.width=vp.width;cv.height=vp.height;const cx=cv.getContext('2d');cx.fillStyle='#fff';cx.fillRect(0,0,cv.width,cv.height);
+     await pg.render({canvasContext:cx,viewport:vp}).promise;
+     const im=new Image();im.src=cv.toDataURL('image/jpeg',0.9);imgs.push(im);cv.width=cv.height=0}
+    pdf.destroy();
+   }else{const u=URL.createObjectURL(j.blob);urls.push(u);const im=new Image();im.src=u;imgs.push(im)}
+   await Promise.all(imgs.map(i=>i.decode().catch(()=>{})));
+   for(let c=0;c<j.copies;c++)for(const im of imgs)pa.append(el('div',{class:'pg'},clone(im)));
+   await new Promise(r=>setTimeout(r,300));
+   await printAndWait();
+   j.finished=Date.now();notify(j,'done');
+  }catch(e){j.error=String(e.message||e).slice(0,80);j.finished=Date.now();notify(j,'error')}
+  finally{pa.replaceChildren();urls.forEach(URL.revokeObjectURL);j.blob=null;j.html=null;j.orig=null;printing=false;render();pump()}
+ }
+ $('#pq').onclick=async()=>{const src=$('#qr img')?.src||$('#qr canvas')?.toDataURL();if(!src)return;
+  $('#pgstyle').textContent='@page{size:210mm 297mm;margin:0}.pg{height:296mm}';const pa=$('#pa');pa.className='';
+  const im=new Image();im.src=src;im.style.width='90mm';
+  pa.replaceChildren(el('div',{class:'pg'},el('h1',{text:cfg.shop}),el('p',{text:'Scan to send your document for printing'}),im));
+  await im.decode().catch(()=>{});await printAndWait();pa.replaceChildren()};
+ function render(){
+  const q=$('#q');q.replaceChildren();
+  [...jobs].reverse().forEach(j=>{
+   const c=el('div',{class:'card'},el('b',{text:`#${j.token} ${j.name}`}),
+    el('div',{class:'mut',text:`${j.filename} | ${j.type==='docx'?'~':''}${j.pages}p x ${j.copies} ${j.paper} ${j.color?'colour':'B/W'} | ${cfg.cur}${j.amount} | ${j.status}${j.error?' - '+j.error:''}`}));
+   if(j.status==='queued'&&!agent&&(j.duplex||j.type==='docx'))c.append(el('div',{class:'err',text:[j.duplex?'DOUBLE-SIDED requested: set the printer to duplex first, then press Print (not auto-printed).':'',j.type==='docx'?'Word file: layout/page count may differ slightly.':''].filter(Boolean).join(' ')}));
+   if(j.status==='queued')c.append(el('div',{},el('button',{class:'s',text:'Print',onclick:()=>print(j)}),el('button',{class:'s',text:'Reject',onclick:()=>rejectJob(j)})));
+   q.append(c)});
+  if(!jobs.length)q.textContent='No jobs yet.';
+ }
+ setInterval(()=>{const now=Date.now();let ch=false;
+  jobs.forEach(j=>{if(j.status==='queued'&&now-j.created>TTL){j.blob=null;j.html=null;j.orig=null;j.finished=now;notify(j,'expired');ch=true}});
+  for(let i=jobs.length-1;i>=0;i--)if(jobs[i].finished&&now-jobs[i].finished>600000){jobs.splice(i,1);ch=true}
+  if(ch)render()},30000);
+ render();pingAgent();setInterval(pingAgent,15000);
+}
+</script></body></html>
